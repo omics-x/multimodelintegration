@@ -1,0 +1,207 @@
+---
+title: "ADNI datasets"
+author: "Shahzad"
+date: "`r format(Sys.Date(), '%A, %d %B %Y')`"
+css: layout.css
+output:
+  html_document:
+    number_sections: no
+    code_folding: hide
+    theme: united
+    toc: yes
+    toc_depth: 4
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+---
+
+<!-- Defining font size for the document -->
+
+<style type="text/css">
+  body{
+  font-size: 12pt;
+}
+</style>
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T,
+                      message = F,
+                      warning = F,
+                      eval = T)
+# load packages
+pacman::p_load(data.table,
+               here,
+               gtsummary,
+               flextable,
+               rio,
+               DT,
+               UpSetR,
+               tidyverse)
+```
+# List the Biomarker files in the folders 
+```{r}
+# Set your ADNI dataset path
+data_path <- "/home/rstudio/new_direc/data_unziped"
+#list.files(file.path(data_path, "Biospecimen"), full.names = TRUE)
+#list.files(file.path(data_path, "Enrollment"), full.names = TRUE)
+
+biomarker_file <- file.path(data_path, "Biospecimen", "UPENNBIOMK_MASTER_FINAL_20May2023.csv")
+diagnosis_file <- file.path(data_path, "Assessments", "DXSUM_PDXCONV_ADNIALL_19May2023.csv")
+
+# Load data
+biomarkers <- read_csv(biomarker_file)
+diagnosis <- read_csv(diagnosis_file)
+
+```
+# Read the biomarker files and calculate the AT categories for the biomarkers
+```{r}
+biomarkers_Batch9<- biomarkers %>%
+  filter(BATCH=='UPENNBIOMK9') %>% 
+  mutate(RID_VISCODE2=paste0(RID,'_',VISCODE2)) %>% 
+  select(RID_VISCODE2,RID,VISCODE2,ABETA42, TAU, PTAU)
+# Converting the variables to numeric 
+biomarkers_Batch9$ABETA42<-as.numeric(biomarkers_Batch9$ABETA42)
+biomarkers_Batch9$TAU<-as.numeric(biomarkers_Batch9$TAU)
+biomarkers_Batch9$PTAU<-as.numeric(biomarkers_Batch9$PTAU)
+# Creating an ATN category profiles of individuals 
+biomarkers_Batch9$ATN_category2<-NA
+biomarkers_Batch9$ATN_category2[biomarkers_Batch9$ABETA42>976.6 & biomarkers_Batch9$PTAU<21.8]<-'A_T_'
+biomarkers_Batch9$ATN_category2[biomarkers_Batch9$ABETA42<976.6 & biomarkers_Batch9$PTAU<21.8]<-'A+T_'
+biomarkers_Batch9$ATN_category2[biomarkers_Batch9$ABETA42<976.6 & biomarkers_Batch9$PTAU>21.8]<-'A+T+'
+
+  
+```
+# Add the diagnosis information
+
+```{r}
+
+dxsum<-read_csv(file.path(data_path, "Assessments", "DXSUM_PDXCONV_ADNIALL_19May2023.csv"))
+registry <- read_csv(file.path(data_path, "Enrollment", "REGISTRY_19May2023.csv"))
+arm<-read_csv(file.path(data_path, "Enrollment", "ARM_19May2023.csv"))
+
+dxsum$DXCHANGE <- NA
+# Assign based on conditions
+dxsum$DXCHANGE[dxsum$DXCONV == 0 & dxsum$DXCURREN == 1] <- 1
+dxsum$DXCHANGE[dxsum$DXCONV == 0 & dxsum$DXCURREN == 2] <- 2
+dxsum$DXCHANGE[dxsum$DXCONV == 0 & dxsum$DXCURREN == 3] <- 3
+dxsum$DXCHANGE[dxsum$DXCONV == 1 & dxsum$DXCONTYP == 1] <- 4
+dxsum$DXCHANGE[dxsum$DXCONV == 1 & dxsum$DXCONTYP == 3] <- 5
+dxsum$DXCHANGE[dxsum$DXCONV == 1 & dxsum$DXCONTYP == 2] <- 6
+dxsum$DXCHANGE[dxsum$DXCONV == 2 & dxsum$DXREV == 1] <- 7
+dxsum$DXCHANGE[dxsum$DXCONV == 2 & dxsum$DXREV == 2] <- 8
+dxsum$DXCHANGE[dxsum$DXCONV == 2 & dxsum$DXREV == 3] <- 9
+
+
+# Identify variable to keep for merged data
+armVars <- c("RID","Phase","ARM","ENROLLED")
+dxsumVars <- c("RID","Phase", "VISCODE2","DXCHANGE","VISCODE")
+# merge data
+dxarm <- merge(dxsum[dxsumVars], arm[armVars], by=c("RID","Phase"))
+# baseline data
+baseData <- dxarm[dxarm$VISCODE2=='bl' & dxarm$ENROLLED%in% c(1,2,3),]
+
+# assign baseline diagnosis
+baseData$baselineDx<-NA
+baseData$baselineDx[(baseData$DXCHANGE %in% c(1,7,9)) & baseData$ARM != 11 ] = 1
+baseData$baselineDx[(baseData$DXCHANGE %in% c(1,7,9)) & baseData$ARM == 11 ] = 2
+baseData$baselineDx[(baseData$DXCHANGE %in% c(2,4,8)) & baseData$ARM == 10 ] = 3
+baseData$baselineDx[(baseData$DXCHANGE %in% c(2,4,8)) & baseData$ARM != 10 ] = 4
+baseData$baselineDx[(baseData$DXCHANGE %in% c(3,5,6))] = 5
+# merge baseline diagnosis
+baseVars <- c("RID","baselineDx")
+dxarm <- merge( dxarm, baseData[baseVars],by=c("RID"))
+
+# Merging with the registry files 
+# identify variable to keep for merged data
+regVars <-c("RID", "Phase", "VISCODE", "VISCODE2",
+            "EXAMDATE", "PTSTATUS", "RGCONDCT", "RGSTATUS",
+            "VISTYPE")
+# merge data
+dxarm_reg <-left_join(dxarm,registry[regVars], by=c("RID", "Phase", "VISCODE"))
+
+# Merging the DXCHANGE AND baselineDx variables with the main df.
+df<-dxarm_reg %>% 
+  mutate(RID_VISCODE2=paste0(RID,'_',VISCODE2.x)) %>% 
+  select(RID_VISCODE2,DXCHANGE,baselineDx) %>% 
+  merge(biomarkers_Batch9,by='RID_VISCODE2',all.y = T)
+
+```
+
+# Add date to calculate the progression analysis
+
+```{r}
+# Upload the registry dataset 
+registry <- read_csv(file.path(data_path, "Enrollment", "REGISTRY_19May2023.csv"))
+registry_dates <- registry %>%
+  select(RID, VISCODE2, EXAMDATE)
+
+# Merge with your df
+df_time <- df %>%
+  left_join(registry_dates, by = c("RID", "VISCODE2"))
+
+# Baseline data 
+baseline_dates <- df_with_dates %>%
+  filter(VISCODE2 == "bl") %>%
+  select(RID, baseline_date = EXAMDATE)
+
+# Merge date information with full dataset with dates 
+df_days <- df_time %>%
+  left_join(baseline_dates, by = "RID") %>%
+  mutate(days_since_bl = as.numeric(difftime(EXAMDATE, baseline_date, units = "days")))
+```
+
+
+```{r}
+# Step 1: filter baseline MCI subjects
+mci_subjects <- df_days %>%
+  filter(VISCODE2 == "bl", baselineDx %in% c(3, 4)) %>%
+  select(RID, ABETA42, TAU, PTAU, ATN_category2, baseline_date)
+
+# Step 2: identify progression to AD and time
+progression_info <- df_days %>%
+  filter(DXCHANGE == 4) %>%  # MCI -> AD
+  group_by(RID) %>%
+  summarise(time_to_event = min(days_since_bl, na.rm = TRUE), event = 1)
+
+# Step 3: censoring for those who never progressed
+censored_info <- df_days %>%
+  group_by(RID) %>%
+  summarise(last_followup = max(days_since_bl, na.rm = TRUE)) %>%
+  filter(!RID %in% progression_info$RID) %>%
+  mutate(time_to_event = last_followup, event = 0) %>%
+  select(RID, time_to_event, event)
+
+# Step 4: Combine all info
+surv_data <- bind_rows(progression_info, censored_info) %>%
+  left_join(mci_subjects, by = "RID")
+```
+
+
+```{r}
+library(survival)
+library(survminer)
+
+# Fit survival model
+surv_fit <- survfit(Surv(time_to_event, event) ~ 1, data = surv_data)
+```
+
+```{r}
+surv_fit_ATN <- survfit(Surv(time_to_event, event) ~ ATN_category2, data = surv_data)
+
+# Plot
+ggsurvplot(surv_fit_ATN,
+           data = surv_data,
+           risk.table = TRUE,
+           pval = TRUE,
+           xlab = "Time from Baseline (days)",
+           ylab = "Survival Probability",
+           title = "KM Curves by ATN Category",
+           palette = "Dark2")
+```
+
+
+
+
+
+
