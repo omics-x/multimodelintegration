@@ -54,21 +54,41 @@ biomarkers <- read_csv(biomarker_file)
 diagnosis <- read_csv(diagnosis_file)
 
 ```
+
+```{r}
+# Code for preprocessing used from published project https://doi.org/10.1093/brain/awae176
+biomarkers <- subset(upennbio, RUNDATE>=as.Date("2016-11-17"))
+
+#go through each RID and compute median of values at duplicate time points
+biomarkers$ABETA42  <- as.double(gsub("<","", gsub(">","", biomarkers$ABETA42)))
+biomarkers$TAU  <- as.double(gsub("<","", gsub(">","", biomarkers$TAU)))
+biomarkers$PTAU <- as.double(gsub("<","", gsub(">","", biomarkers$PTAU)))
+
+tag <- apply(biomarkers,1, function(x){ paste(as.integer(x["RID"]), x["VISCODE2"], sep="_") })
+
+biomarkers_clean <- data.frame(t(sapply(unique(tag), function(tt){
+  tmp <- biomarkers[tag == tt,]
+  out_a <- tmp[1, c("PHASE","RID","VISCODE2","EXAMDATE")]
+  out_b <- apply(tmp[,c("ABETA40","ABETA42","TAU","PTAU")],2, median, na.rm=T)
+  return(unlist(c(out_a, out_b)))
+})))
+
+for ( bioM in c("RID","ABETA40","ABETA42","TAU","PTAU")){
+  biomarkers_clean[[bioM]] <- as.double(biomarkers_clean[[bioM]])
+}
+```
+
 # Read the biomarker files and calculate the AT categories for the biomarkers
 ```{r}
-biomarkers_Batch9<- biomarkers %>%
-  filter(BATCH=='UPENNBIOMK9') %>% 
-  mutate(RID_VISCODE2=paste0(RID,'_',VISCODE2)) %>% 
-  select(RID_VISCODE2,RID,VISCODE2,ABETA42, TAU, PTAU)
 # Converting the variables to numeric 
-biomarkers_Batch9$ABETA42<-as.numeric(biomarkers_Batch9$ABETA42)
-biomarkers_Batch9$TAU<-as.numeric(biomarkers_Batch9$TAU)
-biomarkers_Batch9$PTAU<-as.numeric(biomarkers_Batch9$PTAU)
+biomarkers_clean$ABETA42<-as.numeric(biomarkers_clean$ABETA42)
+biomarkers_clean$TAU<-as.numeric(biomarkers_clean$TAU)
+biomarkers_clean$PTAU<-as.numeric(biomarkers_clean$PTAU)
 # Creating an ATN category profiles of individuals 
-biomarkers_Batch9$ATN_category2<-NA
-biomarkers_Batch9$ATN_category2[biomarkers_Batch9$ABETA42>976.6 & biomarkers_Batch9$PTAU<21.8]<-'A_T_'
-biomarkers_Batch9$ATN_category2[biomarkers_Batch9$ABETA42<976.6 & biomarkers_Batch9$PTAU<21.8]<-'A+T_'
-biomarkers_Batch9$ATN_category2[biomarkers_Batch9$ABETA42<976.6 & biomarkers_Batch9$PTAU>21.8]<-'A+T+'
+biomarkers_clean$ATN_category2<-NA
+biomarkers_clean$ATN_category2[biomarkers_clean$ABETA42>976.6 & biomarkers_clean$PTAU<21.8]<-'A_T_'
+biomarkers_clean$ATN_category2[biomarkers_clean$ABETA42<976.6 & biomarkers_clean$PTAU<21.8]<-'A+T_'
+biomarkers_clean$ATN_category2[biomarkers_clean$ABETA42<976.6 & biomarkers_clean$PTAU>21.8]<-'A+T+'
 
   
 ```
@@ -141,7 +161,7 @@ df_time <- df %>%
   left_join(registry_dates, by = c("RID", "VISCODE2"))
 
 # Baseline data 
-baseline_dates <- df_with_dates %>%
+baseline_dates <- df_time %>%
   filter(VISCODE2 == "bl") %>%
   select(RID, baseline_date = EXAMDATE)
 
@@ -151,52 +171,84 @@ df_days <- df_time %>%
   mutate(days_since_bl = as.numeric(difftime(EXAMDATE, baseline_date, units = "days")))
 ```
 
+# Add APOE information
+```{r}
+adnimerg<-read_csv(file.path(data_path, "Study_Info", "ADNIMERGE_19May2023.csv"))
+df<-adnimerg %>% 
+  select(RID,VISCODE,APOE4,PTGENDER,AGE) %>% 
+  mutate(RID_VISCODE2 = paste0(RID,'_',VISCODE)) %>% 
+  select(-RID,-VISCODE) %>% 
+  merge(., df_days,by='RID_VISCODE2', all.y = T)
+
+```
 
 ```{r}
-# Step 1: filter baseline MCI subjects
-mci_subjects <- df_days %>%
-  filter(VISCODE2 == "bl", baselineDx %in% c(3, 4)) %>%
-  select(RID, ABETA42, TAU, PTAU, ATN_category2, baseline_date)
+df<-df %>% arrange(RID, EXAMDATE)
+df$coversion_mci_ad<-NA
+df$coversion_mci_ad[which(df$DXCHANGE==5)]<-1
+df$coversion_mci_ad[which(df$DXCHANGE==2)]<-0
 
-# Step 2: identify progression to AD and time
-progression_info <- df_days %>%
-  filter(DXCHANGE == 4) %>%  # MCI -> AD
-  group_by(RID) %>%
-  summarise(time_to_event = min(days_since_bl, na.rm = TRUE), event = 1)
+# Select only MCI to AD converters which first appeared in the follow-up: RID and RID_viscode2 ids 
+ID_mci_to_AD<-df %>% filter(coversion_mci_ad==1) %>% group_by(RID) %>% mutate(serial=row_number()) %>% filter(serial==1) %>% pull(RID_VISCODE2)
+RID_mci_to_AD<-df %>% filter(coversion_mci_ad==1) %>% group_by(RID) %>% mutate(serial=row_number()) %>% filter(serial==1) %>% pull(RID)
+# Select only MCI to MCI participants which never converted to AD until the last follow-up using RID 
+ID_mci_to_mci<- df %>% filter(coversion_mci_ad==0 ) %>% 
+  group_by(RID) %>% mutate(serial=row_number()) %>% 
+  filter(!RID%in%RID_mci_to_AD) %>% 
+  filter(serial==max(serial)) %>% 
+  pull(RID_VISCODE2)
 
-# Step 3: censoring for those who never progressed
-censored_info <- df_days %>%
-  group_by(RID) %>%
-  summarise(last_followup = max(days_since_bl, na.rm = TRUE)) %>%
-  filter(!RID %in% progression_info$RID) %>%
-  mutate(time_to_event = last_followup, event = 0) %>%
-  select(RID, time_to_event, event)
-
-# Step 4: Combine all info
-surv_data <- bind_rows(progression_info, censored_info) %>%
-  left_join(mci_subjects, by = "RID")
+# Pull the IDs from both cases and controls and select only those with greater than 0 follow-up years and log transform the variable 
+df_mci_ad<-df %>% filter(RID_VISCODE2%in%ID_mci_to_AD | RID_VISCODE2%in%ID_mci_to_mci)
+# In the final dataset, there are some participants which are Normal (not MCI) as per baselineDx variables: 4041_m24 and 4506_m24. 
+res.cox<-coxph(Surv(df_days, coversion_mci_ad) ~ 1 + APOE4, data = df_mci_ad)
+summary(res.cox)
 ```
 
 
+
+# Creating the dataset for the survival analysis 
+```{r}
+# Only keep EMCI/LMCI at baseline
+mci_baseline <- df %>%
+  filter(VISCODE2 == "bl", baselineDx %in% c(3, 4)) %>%
+  select(RID, baselineDx, ABETA42, TAU, PTAU, ATN_category2, baseline_date, APOE4, PTGENDER,AGE)
+
+# Get time to AD conversion (DXCHANGE == 5)
+conversion <- df %>%
+  filter(DXCHANGE == 5, !is.na(days_since_bl)) %>%
+  group_by(RID) %>%
+  summarise(time_to_event = min(days_since_bl), event = 1)
+
+censored <- df %>%
+  filter(DXCHANGE == 2, !is.na(days_since_bl)) %>%
+  group_by(RID) %>%
+  summarise(time_to_event = max(days_since_bl), event = 0)
+
+# Combine
+surv_data <- bind_rows(conversion, censored) %>%
+  left_join(mci_baseline, by = "RID") %>%
+  mutate(time_to_event_months = time_to_event / 30.44)
+```
+
+
+```{r}
+
+
+```
+
+# Survial analysis
 ```{r}
 library(survival)
 library(survminer)
-
-# Fit survival model
-surv_fit <- survfit(Surv(time_to_event, event) ~ 1, data = surv_data)
-```
-
-```{r}
-surv_fit_ATN <- survfit(Surv(time_to_event, event) ~ ATN_category2, data = surv_data)
-
-# Plot
-ggsurvplot(surv_fit_ATN,
+fit <- survfit(Surv(time_to_event_months, event) ~ APOE4, data = surv_data)
+ggsurvplot(fit,
            data = surv_data,
            risk.table = TRUE,
            pval = TRUE,
-           xlab = "Time from Baseline (days)",
-           ylab = "Survival Probability",
-           title = "KM Curves by ATN Category",
+           xlab = "Time from Baseline (months)",
+           ylab = "Survival Probability (MCI ➝ AD)",
+           title = "Progression from MCI to AD by ATN Category",
            palette = "Dark2")
 ```
 
