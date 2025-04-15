@@ -57,25 +57,31 @@ diagnosis <- read_csv(diagnosis_file)
 
 ```{r}
 # Code for preprocessing used from published project https://doi.org/10.1093/brain/awae176
-biomarkers <- subset(upennbio, RUNDATE>=as.Date("2016-11-17"))
+biomarkers <- subset(biomarkers, RUNDATE>=as.Date("2016-11-17"))
 
 #go through each RID and compute median of values at duplicate time points
-biomarkers$ABETA42  <- as.double(gsub("<","", gsub(">","", biomarkers$ABETA42)))
-biomarkers$TAU  <- as.double(gsub("<","", gsub(">","", biomarkers$TAU)))
-biomarkers$PTAU <- as.double(gsub("<","", gsub(">","", biomarkers$PTAU)))
+biomarkers <- biomarkers %>%
+  mutate(across(c(ABETA42, TAU, PTAU), ~ as.double(gsub("<|>", "", .))))
 
-tag <- apply(biomarkers,1, function(x){ paste(as.integer(x["RID"]), x["VISCODE2"], sep="_") })
 
-biomarkers_clean <- data.frame(t(sapply(unique(tag), function(tt){
-  tmp <- biomarkers[tag == tt,]
-  out_a <- tmp[1, c("PHASE","RID","VISCODE2","EXAMDATE")]
-  out_b <- apply(tmp[,c("ABETA40","ABETA42","TAU","PTAU")],2, median, na.rm=T)
-  return(unlist(c(out_a, out_b)))
-})))
+biomarkers <- biomarkers %>%
+  mutate(RID_VISCODE2 = paste(RID, VISCODE2, sep = "_"))
 
-for ( bioM in c("RID","ABETA40","ABETA42","TAU","PTAU")){
-  biomarkers_clean[[bioM]] <- as.double(biomarkers_clean[[bioM]])
-}
+# Step 2: Group and summarise
+biomarkers_clean <- biomarkers %>%
+  group_by(RID_VISCODE2) %>%
+  summarise(
+    PHASE = first(PHASE),
+    RID = first(RID),
+    VISCODE2 = first(VISCODE2),
+    EXAMDATE = first(EXAMDATE),
+    ABETA40 = median(ABETA40, na.rm = TRUE),
+    ABETA42 = median(ABETA42, na.rm = TRUE),
+    TAU = median(TAU, na.rm = TRUE),
+    PTAU = median(PTAU, na.rm = TRUE),
+    .groups = "drop"
+  )
+
 ```
 
 # Read the biomarker files and calculate the AT categories for the biomarkers
@@ -144,7 +150,7 @@ dxarm_reg <-left_join(dxarm,registry[regVars], by=c("RID", "Phase", "VISCODE"))
 df<-dxarm_reg %>% 
   mutate(RID_VISCODE2=paste0(RID,'_',VISCODE2.x)) %>% 
   select(RID_VISCODE2,DXCHANGE,baselineDx) %>% 
-  merge(biomarkers_Batch9,by='RID_VISCODE2',all.y = T)
+  merge(biomarkers_clean,by='RID_VISCODE2',all.x =T)
 
 ```
 
@@ -153,12 +159,12 @@ df<-dxarm_reg %>%
 ```{r}
 # Upload the registry dataset 
 registry <- read_csv(file.path(data_path, "Enrollment", "REGISTRY_19May2023.csv"))
-registry_dates <- registry %>%
-  select(RID, VISCODE2, EXAMDATE)
+registry_dates <- registry %>% mutate(RID_VISCODE2=paste0(RID,'_',VISCODE2)) %>% 
+  select(RID_VISCODE2,Phase, RID, VISCODE2, EXAMDATE) 
 
 # Merge with your df
-df_time <- df %>%
-  left_join(registry_dates, by = c("RID", "VISCODE2"))
+df_time <- df %>% select(-EXAMDATE,-PHASE, -RID, -VISCODE2) %>% 
+  left_join(registry_dates, by = "RID_VISCODE2")
 
 # Baseline data 
 baseline_dates <- df_time %>%
@@ -182,33 +188,17 @@ df<-adnimerg %>%
 
 ```
 
-```{r}
-df<-df %>% arrange(RID, EXAMDATE)
-df$coversion_mci_ad<-NA
-df$coversion_mci_ad[which(df$DXCHANGE==5)]<-1
-df$coversion_mci_ad[which(df$DXCHANGE==2)]<-0
-
-# Select only MCI to AD converters which first appeared in the follow-up: RID and RID_viscode2 ids 
-ID_mci_to_AD<-df %>% filter(coversion_mci_ad==1) %>% group_by(RID) %>% mutate(serial=row_number()) %>% filter(serial==1) %>% pull(RID_VISCODE2)
-RID_mci_to_AD<-df %>% filter(coversion_mci_ad==1) %>% group_by(RID) %>% mutate(serial=row_number()) %>% filter(serial==1) %>% pull(RID)
-# Select only MCI to MCI participants which never converted to AD until the last follow-up using RID 
-ID_mci_to_mci<- df %>% filter(coversion_mci_ad==0 ) %>% 
-  group_by(RID) %>% mutate(serial=row_number()) %>% 
-  filter(!RID%in%RID_mci_to_AD) %>% 
-  filter(serial==max(serial)) %>% 
-  pull(RID_VISCODE2)
-
-# Pull the IDs from both cases and controls and select only those with greater than 0 follow-up years and log transform the variable 
-df_mci_ad<-df %>% filter(RID_VISCODE2%in%ID_mci_to_AD | RID_VISCODE2%in%ID_mci_to_mci)
-# In the final dataset, there are some participants which are Normal (not MCI) as per baselineDx variables: 4041_m24 and 4506_m24. 
-res.cox<-coxph(Surv(df_days, coversion_mci_ad) ~ 1 + APOE4, data = df_mci_ad)
-summary(res.cox)
-```
-
-
-
 # Creating the dataset for the survival analysis 
 ```{r}
+######################################################################################################
+#################################################### Progression analysis 
+#################################################### 1 = Stable:NL to NL, (561)
+#################################################### 2 = Stable:MCI to MCI, (809)
+#################################################### 3 = Stable:AD to AD, (326)
+#################################################### 4 = Conv:NL to MCI, (15)
+#################################################### 5 = Conv:MCI to AD, (50)
+#################################################### 6 = Conv:NL to AD, 7 = Rev:MCI to NL, (9) 8 = Rev:AD to MCI (3), 9 = Rev:AD to NL.
+#################################################### Baseline diagnosis: as 1:Normal (495),2:SMC (72),3:EMCI (381),4:LMCI (575),5:AD (250),
 # Only keep EMCI/LMCI at baseline
 mci_baseline <- df %>%
   filter(VISCODE2 == "bl", baselineDx %in% c(3, 4)) %>%
@@ -231,11 +221,6 @@ surv_data <- bind_rows(conversion, censored) %>%
   mutate(time_to_event_months = time_to_event / 30.44)
 ```
 
-
-```{r}
-
-
-```
 
 # Survial analysis
 ```{r}
