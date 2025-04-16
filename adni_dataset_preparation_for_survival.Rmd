@@ -63,11 +63,10 @@ biomarkers <- subset(biomarkers, RUNDATE>=as.Date("2016-11-17"))
 biomarkers <- biomarkers %>%
   mutate(across(c(ABETA42, TAU, PTAU), ~ as.double(gsub("<|>", "", .))))
 
-
+# 
 biomarkers <- biomarkers %>%
   mutate(RID_VISCODE2 = paste(RID, VISCODE2, sep = "_"))
 
-# Step 2: Group and summarise
 biomarkers_clean <- biomarkers %>%
   group_by(RID_VISCODE2) %>%
   summarise(
@@ -236,7 +235,34 @@ ggsurvplot(fit,
            title = "Progression from MCI to AD by ATN Category",
            palette = "Dark2")
 ```
+# Start preparting multi-omics dataset: 
+## Add proteomics dataset
+```{r}
+library(janitor)
+proteomics<-read.csv("/home/rstudio/new_direc/data_unziped/Biospecimen/BiomarkersConsortiumCSF_ADNI1_02Aug2013/Biomarkers Consortium ADNI CSF QC Multiplex data.csv")
+Baseline_phenotype <- dxarm_reg %>%
+  select(RID, Phase, VISCODE2.x, VISCODE, baselineDx) %>%
+  mutate(RID_VISCODE2 = paste(RID, VISCODE2.x, sep = "_")) %>%
+  filter(VISCODE2.x == "bl") %>%
+  select(RID_VISCODE2, baselineDx) 
 
+proteomics_with_id<-proteomics %>% select(-id, -sampid) %>% 
+  mutate(RID_VISCODE2=paste(rid,visit_code, sep='_')) %>% 
+  select(-rid,-visit_code)
+
+# Replace all dots inside the matrix with NA.
+proteomics_with_id[1:159] <- sapply(proteomics_with_id[1:159], function(x) ifelse(x == ".", NA, x))
+
+# Calculate the number of missing proteins 
+missing_summary <- sapply(proteomics_clean, function(x) sum(is.na(x)))
+proteins_with_no_missing<-names(missing_summary)[which(missing_summary==0)]
+proteomics_with_no_missing<-proteomics_with_id %>% select("RID_VISCODE2",all_of(proteins_with_no_missing))
+# we have removed 76 proteins which were missing for all participants
+# length(names(missing_summary)[which(missing_summary>1)]) and confirmed by apply(proteomics_clean, 1, function(x) sum(is.na(x)))
+
+# Merge with the phenotype 
+proteomics_with_phenotype<-proteomics_with_no_missing %>% left_join(Baseline_phenotype,by='RID_VISCODE2')
+```
 
 
 
