@@ -1,0 +1,173 @@
+---
+title: "ADNI datasets"
+author: "Shahzad"
+date: "`r format(Sys.Date(), '%A, %d %B %Y')`"
+css: layout.css
+output:
+  html_document:
+    number_sections: no
+    code_folding: hide
+    theme: united
+    toc: yes
+    toc_depth: 4
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+---
+
+<!-- Defining font size for the document -->
+
+<style type="text/css">
+  body{
+  font-size: 12pt;
+}
+</style>
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T,
+                      message = F,
+                      warning = F,
+                      eval = T)
+# load packages
+pacman::p_load(data.table,
+               here,
+               gtsummary,
+               flextable,
+               rio,
+               DT,
+               UpSetR,
+               tidyverse)
+```
+# List the Biomarker files in the folders 
+```{r}
+# Set your ADNI dataset path
+data_path <- "/home/rstudio/ADNI_DATA_2025"
+list.files(file.path(data_path, "Biospecimen"), full.names = TRUE)
+list.files(file.path(data_path, "Enrollment"), full.names = TRUE)
+
+biomarker_file <- file.path(data_path, "UPENN_PLASMA_FUJIREBIO_QUANTERIX_17Apr2025.csv")
+diagnosis_file <- file.path(data_path, "DXSUM_17Apr2025.csv")
+
+# Load data
+biomarkers <- read_csv(biomarker_file, show_col_types = FALSE)
+diagnosis <- read_csv(diagnosis_file, show_col_types = FALSE)
+
+```
+
+```{r}
+biomarkers <- biomarkers %>%
+  mutate(RID_VISCODE2 = paste(RID, VISCODE2, sep = "_")) %>% 
+  select(RID_VISCODE2,RID,VISCODE2,pT217_F,AB42_F,AB40_F,AB42_AB40_F,pT217_AB42_F,NfL_Q,GFAP_Q)
+
+
+
+```
+# Add the diagnosis information
+
+```{r}
+
+dxsum<-read_csv( file.path(data_path, "DXSUM_17Apr2025.csv"), show_col_types = FALSE)
+registry <- read_csv(file.path(data_path, "REGISTRY_17Apr2025.csv"), show_col_types = FALSE)
+arm<-read_csv(file.path(data_path, "ARM_17Apr2025.csv"), show_col_types = FALSE)
+
+
+# identify variable to keep for merged data
+regVars <-c("RID", "PHASE", "VISCODE", "VISCODE2",
+            "EXAMDATE", "PTSTATUS", "RGCONDCT", "RGSTATUS",
+            "VISTYPE")
+# merge data
+diagnosis_reg <-left_join(dxsum,registry[regVars], by=c("RID", "PHASE", "VISCODE"))
+
+# Merging 
+df<-diagnosis_reg %>% 
+  mutate(RID_VISCODE2=paste0(RID,'_',VISCODE2) ) %>% 
+  select(RID_VISCODE2,DIAGNOSIS,EXAMDATE.y,RID,PHASE,VISCODE2) %>% 
+  merge(biomarkers,by='RID_VISCODE2',all.x =T)
+
+df_clean %>%
+  select(RID_VISCODE2, DIAGNOSIS, EXAMDATE.y, RID.x, PHASE, VISCODE2.x,
+         pT217_F, AB42_F, AB40_F, AB42_AB40_F, pT217_AB42_F, NfL_Q, GFAP_Q) %>%
+  rename_with(~ str_remove(., "\\.x$|\\.y$"))
+
+```
+
+# Add date to calculate the progression analysis
+
+```{r}
+# Baseline data 
+baseline_dates <- df_clean %>%
+  filter(VISCODE2 == "bl") %>%
+  select(RID, baseline_date = EXAMDATE)
+
+# Merge date information with full dataset with dates 
+df_days <- df_clean %>%
+  left_join(baseline_dates, by = "RID") %>%
+  mutate(days_since_bl = as.numeric(difftime(EXAMDATE, baseline_date, units = "days")))
+```
+
+# Add APOE information
+```{r}
+apoe<-read_csv(file.path(data_path, "APOERES_17Apr2025.csv"),, show_col_types = FALSE)
+df_apoe<-apoe %>% 
+  select(RID,GENOTYPE) %>% 
+  merge(., df_days,by='RID', all.y = T)
+
+```
+
+# Start preparting multi-omics dataset: 
+## Add proteomics dataset
+```{r}
+library(janitor)
+proteomics<-read.csv("/home/rstudio/new_direc/data_unziped/Biospecimen/BiomarkersConsortiumCSF_ADNI1_02Aug2013/Biomarkers Consortium ADNI CSF QC Multiplex data.csv")
+
+proteomics_with_id<-proteomics %>% select(-id, -sampid) %>% 
+  mutate(RID_VISCODE2=paste(rid,visit_code, sep='_')) %>% 
+  select(-rid,-visit_code)
+
+# Replace all dots inside the matrix with NA.
+proteomics_with_id[1:159] <- sapply(proteomics_with_id[1:159], function(x) ifelse(x == ".", NA, x))
+
+# Calculate the number of missing proteins 
+missing_summary <- sapply(proteomics_with_id, function(x) sum(is.na(x)))
+proteins_with_no_missing<-names(missing_summary)[which(missing_summary==0)]
+proteomics_with_no_missing<-proteomics_with_id %>% select("RID_VISCODE2",all_of(proteins_with_no_missing))
+# we have removed 76 proteins which were missing for all participants
+# length(names(missing_summary)[which(missing_summary>1)]) and confirmed by apply(proteomics_clean, 1, function(x) sum(is.na(x)))
+
+# Merge with the phenotype 
+proteomics_with_phenotype<-proteomics_with_no_missing %>% left_join(df_apoe,by='RID_VISCODE2')
+```
+
+# Run some checks on the prepared dataset
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+proteomics_long <- proteomics_with_no_missing %>%
+  pivot_longer(
+    cols = -RID_VISCODE2, 
+    names_to = "Marker",
+    values_to = "Value"
+  )
+
+# Density plots for markers 
+ggplot(proteomics_long, aes(x = Value)) +
+  geom_density(fill = "skyblue", alpha = 0.5) +
+  facet_wrap(~ Marker, scales = "free") +
+  theme_minimal() +
+  labs(title = "Distribution of Proteomics", x = "Value", y = "Density")
+
+# Boxplots for the proteomics data
+ggplot(proteomics_long, aes(x = Marker, y = Value)) +
+  geom_boxplot() +
+  coord_flip() +
+  theme_minimal()
+```
+
+
+
+
+

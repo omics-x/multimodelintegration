@@ -42,12 +42,14 @@ pacman::p_load(data.table,
 # List the Biomarker files in the folders 
 ```{r}
 # Set your ADNI dataset path
-data_path <- "/home/rstudio/new_direc/data_unziped"
-#list.files(file.path(data_path, "Biospecimen"), full.names = TRUE)
-#list.files(file.path(data_path, "Enrollment"), full.names = TRUE)
-
+data_path <- "/home/rstudio/ADNI_DATA_2025"
+list.files(file.path(data_path, "Biospecimen"), full.names = TRUE)
+list.files(file.path(data_path, "Enrollment"), full.names = TRUE)
 biomarker_file <- file.path(data_path, "Biospecimen", "UPENNBIOMK_MASTER_FINAL_20May2023.csv")
 diagnosis_file <- file.path(data_path, "Assessments", "DXSUM_PDXCONV_ADNIALL_19May2023.csv")
+
+#biomarker_file <- file.path(data_path, "UPENN_PLASMA_FUJIREBIO_QUANTERIX_17Apr2025.csv")
+#diagnosis_file <- file.path(data_path, "DXSUM_17Apr2025.csv")
 
 # Load data
 biomarkers <- read_csv(biomarker_file)
@@ -102,21 +104,21 @@ biomarkers_clean$ATN_category2[biomarkers_clean$ABETA42<976.6 & biomarkers_clean
 ```{r}
 
 dxsum<-read_csv(file.path(data_path, "Assessments", "DXSUM_PDXCONV_ADNIALL_19May2023.csv"))
+
 registry <- read_csv(file.path(data_path, "Enrollment", "REGISTRY_19May2023.csv"))
 arm<-read_csv(file.path(data_path, "Enrollment", "ARM_19May2023.csv"))
 
-dxsum$DXCHANGE <- NA
-# Assign based on conditions
-dxsum$DXCHANGE[dxsum$DXCONV == 0 & dxsum$DXCURREN == 1] <- 1
-dxsum$DXCHANGE[dxsum$DXCONV == 0 & dxsum$DXCURREN == 2] <- 2
-dxsum$DXCHANGE[dxsum$DXCONV == 0 & dxsum$DXCURREN == 3] <- 3
-dxsum$DXCHANGE[dxsum$DXCONV == 1 & dxsum$DXCONTYP == 1] <- 4
-dxsum$DXCHANGE[dxsum$DXCONV == 1 & dxsum$DXCONTYP == 3] <- 5
-dxsum$DXCHANGE[dxsum$DXCONV == 1 & dxsum$DXCONTYP == 2] <- 6
-dxsum$DXCHANGE[dxsum$DXCONV == 2 & dxsum$DXREV == 1] <- 7
-dxsum$DXCHANGE[dxsum$DXCONV == 2 & dxsum$DXREV == 2] <- 8
-dxsum$DXCHANGE[dxsum$DXCONV == 2 & dxsum$DXREV == 3] <- 9
-
+# dxsum$DXCHANGE2 <- NA
+# Assign DX CHANGE based on manual coding
+# dxsum$DXCHANGE2[dxsum$DXCONV == 0 & dxsum$DXCURREN == 1] <- 1
+# dxsum$DXCHANGE2[dxsum$DXCONV == 0 & dxsum$DXCURREN == 2] <- 2
+# dxsum$DXCHANGE2[dxsum$DXCONV == 0 & dxsum$DXCURREN == 3] <- 3
+# dxsum$DXCHANGE2[dxsum$DXCONV == 1 & dxsum$DXCONTYP == 1] <- 4
+# dxsum$DXCHANGE2[dxsum$DXCONV == 1 & dxsum$DXCONTYP == 3] <- 5
+# dxsum$DXCHANGE2[dxsum$DXCONV == 1 & dxsum$DXCONTYP == 2] <- 6
+# dxsum$DXCHANGE2[dxsum$DXCONV == 2 & dxsum$DXREV == 1] <- 7
+# dxsum$DXCHANGE2[dxsum$DXCONV == 2 & dxsum$DXREV == 2] <- 8
+# dxsum$DXCHANGE2[dxsum$DXCONV == 2 & dxsum$DXREV == 3] <- 9
 
 # Identify variable to keep for merged data
 armVars <- c("RID","Phase","ARM","ENROLLED")
@@ -262,6 +264,34 @@ proteomics_with_no_missing<-proteomics_with_id %>% select("RID_VISCODE2",all_of(
 
 # Merge with the phenotype 
 proteomics_with_phenotype<-proteomics_with_no_missing %>% left_join(Baseline_phenotype,by='RID_VISCODE2')
+```
+
+# Run some checks on the prepared dataset
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+proteomics_long <- proteomics_with_no_missing %>%
+  pivot_longer(
+    cols = -RID_VISCODE2, 
+    names_to = "Marker",
+    values_to = "Value"
+  )
+
+# Density plots for markers 
+ggplot(proteomics_long, aes(x = Value)) +
+  geom_density(fill = "skyblue", alpha = 0.5) +
+  facet_wrap(~ Marker, scales = "free") +
+  theme_minimal() +
+  labs(title = "Distribution of Proteomics", x = "Value", y = "Density")
+
+# Boxplots for the proteomics data
+ggplot(proteomics_long, aes(x = Marker, y = Value)) +
+  geom_boxplot() +
+  coord_flip() +
+  theme_minimal()
 ```
 
 
